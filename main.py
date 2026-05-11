@@ -11,6 +11,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="AT Conecta - Backend")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+
 # --- DEPENDÊNCIA DO BANCO ---
 def get_db():
     db = SessionLocal()
@@ -64,6 +65,15 @@ def login(dados: dict, db: Session = Depends(get_db)):
         "pacientes": pacientes, 
         "alertas": alertas
     }
+
+# DASHBOARD
+@app.get("/metricas/{usuario_id}")
+def obter_metricas(usuario_id: int, db: Session = Depends(get_db)):
+    pacientes = db.query(PacienteDB).filter(PacienteDB.usuario_id == usuario_id, PacienteDB.deleted_at == None).count()
+    atendimentos = db.query(AtendimentoDB).filter(AtendimentoDB.usuario_id == usuario_id, AtendimentoDB.deleted_at == None).count()
+    alertas = db.query(PacienteDB).filter(PacienteDB.usuario_id == usuario_id, PacienteDB.deleted_at == None, PacienteDB.ponto_alerta == True).count()
+    
+    return {"pacientes": pacientes, "atendimentos": atendimentos, "alertas": alertas}
 
 # --- ROTAS DE PACIENTES ---
 @app.post("/pacientes/")
