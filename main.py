@@ -1,19 +1,17 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from database import SessionLocal, PacienteDB, UsuarioDB  # Adicionei UsuarioDB aqui
+from database import SessionLocal, PacienteDB, UsuarioDB, AtendimentoDB, engine, Base
 from pydantic import BaseModel
 from passlib.context import CryptContext
-from database import engine, Base
+from datetime import datetime
 
+# Garante a criação das tabelas no Codespaces
 Base.metadata.create_all(bind=engine)
 
-# 1. Configuração do FastAPI
-app = FastAPI(title="Sistema de Gestão AT")
-
-# 2. Contexto para criptografia de senhas
+app = FastAPI(title="AT Conecta - Backend")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# 3. Função para abrir/fechar conexão com o banco
+# --- DEPENDÊNCIA DO BANCO ---
 def get_db():
     db = SessionLocal()
     try:
@@ -21,59 +19,94 @@ def get_db():
     finally:
         db.close()
 
-# 4. Modelos de dados (Pydantic)
+# --- MODELOS DE VALIDAÇÃO (PYDANTIC) ---
 class PacienteCreate(BaseModel):
     nome: str
     data_nascimento: str
     responsavel: str = None
     ponto_alerta: bool = False
+    usuario_id: int
 
-# --- ROTAS DE USUÁRIO (LOGIN/CADASTRO) ---
+class AtendimentoCreate(BaseModel):
+    usuario_id: int
+    paciente_id: int
+    data: str # Recebe como string "DD/MM/AAAA HH:MM"
 
+class AtendimentoUpdate(BaseModel):
+    data: str = None
+    confirmado: str = None
+
+# --- ROTAS DE USUÁRIO ---
 @app.post("/usuarios/")
 def criar_usuario(usuario: dict, db: Session = Depends(get_db)):
-    hash_da_senha = pwd_context.hash(usuario['senha'])
-    novo_user = UsuarioDB(
-        email=usuario['email'],
-        nome=usuario['nome'],
-        senha_hash=hash_da_senha
-    )
+    # O bcrypt tem limite de 72 bytes, por isso o slice [:72]
+    hash_da_senha = pwd_context.hash(usuario['senha'][:72])
+    novo_user = UsuarioDB(email=usuario['email'], nome=usuario['nome'], senha_hash=hash_da_senha)
     db.add(novo_user)
     db.commit()
-    return {"status": "Usuário criado com sucesso"}
+    return {"status": "Sucesso"}
 
 @app.post("/login")
 def login(dados: dict, db: Session = Depends(get_db)):
-    user = db.query(UsuarioDB).filter(UsuarioDB.email == dados['email']).first()
-    if not user or not pwd_context.verify(dados['senha'], user.senha_hash):
+    user = db.query(UsuarioDB).filter(UsuarioDB.email == dados['email'], UsuarioDB.deleted_at == None).first()
+    if not user or not pwd_context.verify(dados['senha'][:72], user.senha_hash):
         raise HTTPException(status_code=401, detail="Email ou senha incorretos")
-    return {"nome": user.nome, "email": user.email}
+    
+    # Contadores dinâmicos para os Cards do Dashboard
+    atendimentos = db.query(AtendimentoDB).filter(AtendimentoDB.usuario_id == user.id, AtendimentoDB.deleted_at == None).count()
+    pacientes = db.query(PacienteDB).filter(PacienteDB.usuario_id == user.id, PacienteDB.deleted_at == None).count()
+    alertas = db.query(PacienteDB).filter(PacienteDB.usuario_id == user.id, PacienteDB.deleted_at == None, PacienteDB.ponto_alerta == True).count()
+    
+    return {
+        "nome": user.nome, 
+        "id": user.id, 
+        "atendimentos": atendimentos, 
+        "pacientes": pacientes, 
+        "alertas": alertas
+    }
 
 # --- ROTAS DE PACIENTES ---
-
 @app.post("/pacientes/")
 async def cadastrar_paciente(paciente: PacienteCreate, db: Session = Depends(get_db)):
-    novo_paciente = PacienteDB(
-        nome=paciente.nome,
-        data_nascimento=paciente.data_nascimento,
-        responsavel=paciente.responsavel,
-        ponto_alerta=paciente.ponto_alerta
-    )
-    db.add(novo_paciente)
+    novo = PacienteDB(**paciente.dict())
+    db.add(novo)
     db.commit()
-    db.refresh(novo_paciente)
-    return {"status": "Sucesso", "id": novo_paciente.id}
+    return {"status": "Sucesso"}
 
-@app.get("/pacientes/")
-async def listar_pacientes(db: Session = Depends(get_db)):
-    pacientes = db.query(PacienteDB).all()
-    return pacientes
+@app.get("/pacientes/{usuario_id}")
+async def listar_pacientes_por_usuario(usuario_id: int, db: Session = Depends(get_db)):
+    return db.query(PacienteDB).filter(PacienteDB.usuario_id == usuario_id, PacienteDB.deleted_at == None).all()
 
 @app.delete("/pacientes/{paciente_id}")
 async def excluir_paciente(paciente_id: int, db: Session = Depends(get_db)):
     paciente = db.query(PacienteDB).filter(PacienteDB.id == paciente_id).first()
-    if not paciente:
-        raise HTTPException(status_code=404, detail="Paciente não encontrado")
-    db.delete(paciente)
+    if not paciente: raise HTTPException(status_code=404)
+    paciente.deleted_at = datetime.utcnow() # Soft Delete
     db.commit()
-    return {"status": "Sucesso", "mensagem": f"Paciente {paciente_id} removido."}
+    return {"status": "Removido"}
+
+# --- ROTAS DE ATENDIMENTOS ---
+@app.post("/atendimentos/")
+async def criar_atendimento(atendimento: AtendimentoCreate, db: Session = Depends(get_db)):
+    # Converte string para objeto datetime do Python
+    dt_objeto = datetime.strptime(atendimento.data, "%d/%m/%Y %H:%M")
+    novo = AtendimentoDB(
+        usuario_id=atendimento.usuario_id,
+        paciente_id=atendimento.paciente_id,
+        data=dt_objeto
+    )
+    db.add(novo)
+    db.commit()
+    return {"status": "Sucesso"}
+
+@app.get("/atendimentos/{usuario_id}")
+async def listar_atendimentos(usuario_id: int, db: Session = Depends(get_db)):
+    # Faz um JOIN para trazer o nome do paciente junto com o atendimento
+    resultado = db.query(AtendimentoDB, PacienteDB.nome).join(
+        PacienteDB, PacienteDB.id == AtendimentoDB.paciente_id
+    ).filter(AtendimentoDB.usuario_id == usuario_id, AtendimentoDB.deleted_at == None).all()
+    
+    return [
+        {"id": a.id, "data": a.data.strftime("%d/%m/%Y %H:%M"), "paciente_nome": nome} 
+        for a, nome in resultado
+    ]
