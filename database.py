@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -39,6 +39,15 @@ class AtendimentoDB(Base):
     confirmado = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+
+class NotaDB(Base):
+    __tablename__ = "notas"
+    id = Column(Integer, primary_key=True, index=True)
+    conteudo = Column(String)
+    tipo = Column(String)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    concluida = Column(Boolean, default=False)  # <-- Novo campo
     deleted_at = Column(DateTime, nullable=True)
 
 Base.metadata.create_all(bind=engine)
