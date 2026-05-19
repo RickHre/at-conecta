@@ -5,7 +5,7 @@ from requests import RequestException
 
 st.set_page_config(page_title="AT Conecta - Univesp", layout="wide")
 
-BASE_URL = "https://fictional-bassoon-69rj7jrg9qppc49vj-8080.app.github.dev"
+BASE_URL = "https://at-conecta.onrender.com"
 ENDPOINTS = {
     "usuarios": "/usuarios/",
     "login": "/login",
