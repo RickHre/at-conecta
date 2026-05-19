@@ -1,439 +1,491 @@
 import streamlit as st
 import requests
+import time
+from requests import RequestException
 
-# 1. Configurações da página
 st.set_page_config(page_title="AT Conecta - Univesp", layout="wide")
 
-# link da aba 'Ports' do Codespaces
 BASE_URL = "https://fictional-bassoon-69rj7jrg9qppc49vj-8080.app.github.dev"
+ENDPOINTS = {
+    "usuarios": "/usuarios/",
+    "login": "/login",
+    "pacientes": "/pacientes/",
+    "atendimentos": "/atendimentos/",
+    "notas": "/notas/",
+    "dashboard": "/dashboard/stats/",
+}
 
-# URLs específicas
-API_PACIENTES = f"{BASE_URL}/pacientes/"
-API_ATENDIMENTOS = f"{BASE_URL}/atendimentos/"
-API_LOGIN = f"{BASE_URL}/login"
+MENU_DASHBOARD = "Dashboard"
+MENU_CADASTRAR_PACIENTE = "Cadastrar Paciente"
+MENU_LISTAR_PACIENTES = "Listar Pacientes"
+MENU_AGENDAR_ATENDIMENTO = "Agendar Atendimento"
+MENU_LISTA_ATENDIMENTOS = "Lista de Atendimentos"
+MENU_LOGS = "Logs do Sistema"
+MENU_NOTAS = "Gerenciar Notas"
+MENU_OPTIONS = [
+    MENU_DASHBOARD,
+    MENU_CADASTRAR_PACIENTE,
+    MENU_LISTAR_PACIENTES,
+    MENU_AGENDAR_ATENDIMENTO,
+    MENU_LISTA_ATENDIMENTOS,
+    MENU_LOGS,
+    MENU_NOTAS,
+]
 
-# 2. Inicializa o estado de login e navegação
-if "logado" not in st.session_state:
-    st.session_state.logado = False
-if "menu_atual" not in st.session_state:
-    st.session_state.menu_atual = "Dashboard"
 
-# --- TELA DE LOGIN ---
-if not st.session_state.logado:
-    st.title("🔐 Acesso ao Sistema")
-    tab_login, tab_cadastro = st.tabs(["Login", "Novo Usuário"])
+def api_url(key: str, extra: str = "") -> str:
+    return f"{BASE_URL}{ENDPOINTS[key]}{extra}"
 
-    with tab_login:
-        email_l = st.text_input("Email")
-        senha_l = st.text_input("Senha", type="password")
-        if st.button("Entrar"):
-            res = requests.post(API_LOGIN, json={"email": email_l, "senha": senha_l})
-            if res.status_code == 200:
-                data = res.json()
-                st.session_state.logado = True
-                st.session_state.usuario_id = data['id']
-                st.session_state.nome_usuario = data['nome']
-                # Guardamos os contadores do banco para os cards
-                st.session_state.atendimentos = data['atendimentos']
-                st.session_state.pacientes = data['pacientes']
-                st.session_state.alertas = data['alertas']
-                st.rerun()
-            else:
-                st.error("Usuário ou senha incorretos.")
 
-    with tab_cadastro:
-        st.subheader("Criar conta de Especialista")
-        
-        # Certifique-se de que estes nomes (nome_novo, etc) são os mesmos no payload
-        nome_novo = st.text_input("Nome Completo", key="reg_nome")
-        email_novo = st.text_input("Novo Email", key="reg_email")
-        senha_novo = st.text_input("Nova Senha", type="password", key="reg_senha")
-        
-        if st.button("Cadastrar Especialista"):
-            # O payload usa as variáveis que acabamos de criar acima
-            payload = {
-                "nome": nome_novo, 
-                "email": email_novo, 
-                "senha": senha_novo
-            }
-            
-            try:
-                # Faz a chamada para o link do Codespaces
-                res = requests.post(f"{BASE_URL}/usuarios/", json=payload)
-                
-                if res.status_code == 200:
-                    st.success("Conta criada! Já pode fazer login na outra aba.")
-                else:
-                    st.error(f"Erro: {res.status_code}")
-            except Exception as e:
-                st.error(f"Erro de conexão com o servidor: {e}")
+def api_call(method: str, key: str, extra: str = "", **kwargs):
+    try:
+        return requests.request(method, api_url(key, extra), timeout=10, **kwargs)
+    except RequestException as exc:
+        st.error("Falha ao conectar com o servidor. Verifique sua rede ou URL.")
+        st.session_state.last_error = str(exc)
+        return None
 
-# --- SISTEMA LOGADO ---
-else:
+
+def get_json(key: str, extra: str = ""):
+    res = api_call("get", key, extra)
+    return res.json() if res and res.ok else None
+
+
+def post_json(key: str, payload: dict):
+    return api_call("post", key, json=payload)
+
+
+def delete_resource(key: str, extra: str):
+    return api_call("delete", key, extra)
+
+
+def init_state():
+    st.session_state.setdefault("logado", False)
+    st.session_state.setdefault("menu_atual", MENU_DASHBOARD)
+    st.session_state.setdefault("filtro_alerta", False)
+    st.session_state.setdefault("atendimentos", 0)
+    st.session_state.setdefault("pacientes", 0)
+    st.session_state.setdefault("alertas", 0)
+    st.session_state.setdefault("total_registros", 0)
+
+
+def goto(menu: str, **kwargs):
+    for key, value in kwargs.items():
+        st.session_state[key] = value
+    st.session_state.menu_atual = menu
+
+
+def render_top_sidebar():
     st.sidebar.title("📌 Navegação")
     st.sidebar.write(f"Logado como: **{st.session_state.nome_usuario}**")
-    
-    opcoes_menu = ["Dashboard", "Cadastrar Paciente", "Listar Pacientes", "Agendar Atendimento", "Lista de Atendimentos","Logs do Sistema" ,"Gerenciar Notas"]
-    
-    # Sincroniza o selectbox com o estado do menu
     menu = st.sidebar.selectbox(
-        "Menu", 
-        opcoes_menu,
-        index=opcoes_menu.index(st.session_state.menu_atual)
+        "Menu",
+        MENU_OPTIONS,
+        index=MENU_OPTIONS.index(st.session_state.menu_atual),
     )
     st.session_state.menu_atual = menu
 
-    # --- DASHBOARD DINÂMICO ---
-    if menu == "Dashboard":
-        # ATUALIZAÇÃO AUTOMÁTICA DOS NÚMEROS
-        try:
-            # Fazemos uma chamada rápida para pegar os números reais
-            res_stats = requests.get(f"{BASE_URL}/dashboard/stats/{st.session_state.usuario_id}")
-            if res_stats.status_code == 200:
-                stats = res_stats.json()
-                st.session_state.atendimentos = stats['atendimentos']
-                st.session_state.pacientes = stats['pacientes']
-                st.session_state.alertas = stats['alertas']
-                st.session_state.total_registros = stats['total_registros']
-        except Exception as e:
-            st.error(f"Erro ao sincronizar dados: {e}")
 
-        st.title(f"👋 Olá, {st.session_state.nome_usuario}!")
-        st.write("Aqui está o seu resumo de hoje:")
+def render_login_screen():
+    st.title("🔐 Acesso ao Sistema")
+    login_tab, signup_tab = st.tabs(["Login", "Novo Usuário"])
 
-        # 1. LINHA DE CARDS (Métricas Dinâmicas)
-        c1, c2, c3, c4 = st.columns(4)
-        card_style = "padding: 20px; border-radius: 15px; color: white; text-align: center; height: 130px; margin-bottom: 5px;"
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Senha", type="password")
+            if st.form_submit_button("Entrar"):
+                res = post_json("login", {"email": email, "senha": password})
+                if res and res.ok:
+                    data = res.json()
+                    st.session_state.update(
+                        logado=True,
+                        usuario_id=data["id"],
+                        nome_usuario=data["nome"],
+                        atendimentos=data.get("atendimentos", 0),
+                        pacientes=data.get("pacientes", 0),
+                        alertas=data.get("alertas", 0),
+                        total_registros=data.get("total_registros", 0),
+                    )
+                    st.rerun()
+                else:
+                    st.error("Usuário ou senha incorretos.")
 
-        #Card Atendimentos
-        with c1:
-            st.markdown(f'<div style="background-color: #4CAF50; {card_style}"><h4>Atendimentos Hoje</h4><h2>👥 {st.session_state.atendimentos}</h2></div>', unsafe_allow_html=True)
-            if st.button("📅 Ver Agenda", use_container_width=True):
-                st.session_state.menu_atual = "Lista de Atendimentos"
-                st.rerun()
+    with signup_tab:
+        st.subheader("Criar conta de Especialista")
+        with st.form("signup_form"):
+            nome = st.text_input("Nome Completo", key="reg_nome")
+            email = st.text_input("Novo Email", key="reg_email")
+            senha = st.text_input("Nova Senha", type="password", key="reg_senha")
+            if st.form_submit_button("Cadastrar Especialista"):
+                payload = {"nome": nome, "email": email, "senha": senha}
+                res = post_json("usuarios", payload)
+                if res and res.ok:
+                    st.success("Conta criada! Já pode fazer login na outra aba.")
+                else:
+                    st.error(f"Erro ao criar usuário: {res.status_code if res else 'sem resposta'}")
 
-        #Card Pacientes
-        with c2:
-            st.markdown(f'<div style="background-color: #FFB300; {card_style}"><h4>Crianças Acompanhadas</h4><h2>👦 {st.session_state.pacientes}</h2></div>', unsafe_allow_html=True)
-            if st.button("📋 Ver Prontuários", use_container_width=True):
-                st.session_state.menu_atual = "Listar Pacientes"
-                st.rerun()
-        #Card Alertas
-        with c3:
-            st.markdown(f'<div style="background-color: #FF5722; {card_style}"><h4>Alertas Ativos</h4><h2>⚠️ {st.session_state.alertas}</h2></div>', unsafe_allow_html=True)
-            if st.button("⚠️ Ver Alertas", use_container_width=True):
-                st.session_state.menu_atual = "Listar Pacientes"
-                st.session_state.filtro_alerta = True # Ativa o filtro
-                st.rerun()
 
-        #Card Logs
-        with c4:
-            st.markdown(f'<div style="background-color: #2196F3; {card_style}"><h4>Últimos Registros</h4><h2>📝 {st.session_state.get("total_registros", 0)}</h2></div>', unsafe_allow_html=True)
-            if st.button("📝 Ver Logs", use_container_width=True):
-                st.session_state.menu_atual = "Logs do Sistema"
-                st.rerun()
+def load_dashboard_stats():
+    stats = get_json("dashboard", str(st.session_state.usuario_id))
+    if stats:
+        st.session_state.atendimentos = stats.get("atendimentos", st.session_state.atendimentos)
+        st.session_state.pacientes = stats.get("pacientes", st.session_state.pacientes)
+        st.session_state.alertas = stats.get("alertas", st.session_state.alertas)
+        st.session_state.total_registros = stats.get("total_registros", st.session_state.total_registros)
+
+
+def metric_card(label: str, value: str, color: str, button_label: str, target_menu: str, key_suffix: str, **kwargs):
+    card_style = (
+        "padding: 20px; border-radius: 15px; color: white; text-align: center;"
+        " height: 130px; margin-bottom: 5px;"
+    )
+    st.markdown(
+        f'<div style="background-color: {color}; {card_style}">'
+        f"<h4>{label}</h4><h2>{value}</h2></div>",
+        unsafe_allow_html=True,
+    )
+    st.button(
+        button_label,
+        use_container_width=True,
+        key=f"card_{key_suffix}",
+        on_click=goto,
+        args=(target_menu,),
+        kwargs=kwargs,
+    )
+
+
+def render_dashboard():
+    load_dashboard_stats()
+    st.title(f"👋 Olá, {st.session_state.nome_usuario}!")
+    st.write("Aqui está o seu resumo de hoje:")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card(
+            "Atendimentos Hoje",
+            f"👥 {st.session_state.atendimentos}",
+            "#4CAF50",
+            "📅 Ver Agenda",
+            MENU_LISTA_ATENDIMENTOS,
+            key_suffix="atendimentos"
+        )
+    with c2:
+        metric_card(
+            "Crianças Acompanhadas",
+            f"👦 {st.session_state.pacientes}",
+            "#FFB300",
+            "📋 Ver Prontuários",
+            MENU_LISTAR_PACIENTES,
+            key_suffix="pacientes"
+        )
+    with c3:
+        metric_card(
+            "Alertas Ativos",
+            f"⚠️ {st.session_state.alertas}",
+            "#FF5722",
+            "⚠️ Ver Alertas",
+            MENU_LISTAR_PACIENTES,
+            key_suffix="alertas",
+            filtro_alerta=True,
+        )
+    with c4:
+        metric_card(
+            "Últimos Registros",
+            f"📝 {st.session_state.total_registros}",
+            "#2196F3",
+            "📝 Ver Logs",
+            MENU_LOGS,
+            key_suffix="logs"
+        )
+
+    st.divider()
+    col_agenda, col_notas = st.columns([2, 1])
+
+    with col_agenda:
+        st.subheader("🗓️ Próximos Atendimentos")
+        agenda = get_json("atendimentos", str(st.session_state.usuario_id)) or []
+        if not agenda:
+            st.info("Nenhum atendimento agendado.")
+        else:
+            for atendimento in agenda[:3]:
+                with st.container():
+                    st.write(f"🕒 **{atendimento['data']}** - {atendimento['paciente_nome']}")
+            st.button(
+                "Ver Agenda Completa →",
+                use_container_width=True,
+                key="btn_dash_ver_agenda",
+                on_click=goto,
+                args=(MENU_LISTA_ATENDIMENTOS,),
+            )
+
+    with col_notas:
+        st.subheader("📌 Notas Recentes")
+        notas = get_json("notas", str(st.session_state.usuario_id)) or []
+        notas_pendentes = [nota for nota in notas if not nota.get("concluida")][:3]
+        if notas_pendentes:
+            for nota in notas_pendentes:
+                if nota.get("tipo") == "Urgente":
+                    st.error(f"🚨 {nota['conteudo']}")
+                else:
+                    st.info(f"🔹 {nota['conteudo']}")
+        else:
+            st.write("Nenhuma tarefa pendente! 🙌")
 
         st.divider()
+        st.button(
+            "⚙️ Gerenciar Todas as Notas",
+            use_container_width=True,
+            type="primary",
+            key="btn_dash_notas",
+            on_click=goto,
+            args=(MENU_NOTAS,),
+        )
 
-        # 2. SEÇÃO DE CONTEÚDO (Próximos Atendimentos vs Notas)
-        col_agenda, col_notas = st.columns([2, 1])
 
-        with col_agenda:
-            st.subheader("🗓️ Próximos Atendimentos")
-            
-            # Buscamos os atendimentos reais do banco para listar aqui
-            try:
-                res = requests.get(f"{API_ATENDIMENTOS}{st.session_state.usuario_id}")
-                if res.status_code == 200:
-                    agenda = res.json()
-                    if not agenda:
-                        st.info("Nenhum atendimento agendado.")
-                    else:
-                        # Mostra apenas os 3 primeiros para o Dashboard não ficar gigante
-                        for a in agenda[:3]:
-                            with st.container(border=True):
-                                st.write(f"🕒 **{a['data']}** - {a['paciente_nome']}")
-                        
-                        if st.button("Ver Agenda Completa →"):
-                            st.session_state.menu_atual = "Lista de Atendimentos"
-                            st.rerun()
-            except:
-                st.error("Erro ao carregar agenda rápida.")
+def render_notes():
+    st.button(
+        "⬅️ Voltar ao Dashboard",
+        key="btn_notas_voltar",
+        on_click=goto,
+        args=(MENU_DASHBOARD,),
+    )
 
-        # Notas Rápidas
-        with col_notas:
-            st.subheader("📌 Notas Recentes")
-            try:
-                res_n = requests.get(f"{BASE_URL}/notas/{st.session_state.usuario_id}")
-                if res_n.status_code == 200:
-                    notas = res_n.json()
-                    # Mostra apenas as 3 últimas notas não concluídas para não poluir
-                    notas_pendentes = [n for n in notas if not n['concluida']][:3]
-                    
-                    for n in notas_pendentes:
-                        if n['tipo'] == "Urgente":
-                            st.error(f"🚨 {n['conteudo']}")
-                        else:
-                            st.info(f"🔹 {n['conteudo']}")
-                    
-                    if not notas_pendentes:
-                        st.write("Nenhuma tarefa pendente! 🙌")
-            except:
-                st.write("Sem notas para exibir.")
+    st.header("🗒️ Gerenciador de Notas")
+    with st.expander("➕ Nova Tarefa", expanded=True):
+        with st.form("form_nota"):
+            texto = st.text_input("Descrição da tarefa")
+            prioridade = st.selectbox("Prioridade", ["Normal", "Urgente"])
+            if st.form_submit_button("Adicionar"):
+                payload = {
+                    "conteudo": texto,
+                    "tipo": prioridade,
+                    "usuario_id": st.session_state.usuario_id,
+                }
+                res = post_json("notas", payload)
+                if res and res.ok:
+                    st.toast("Nota criada com sucesso.", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("Falha ao criar nota.")
 
-            st.divider()
-            # Botão principal para a nova página
-            if st.button("⚙️ Gerenciar Todas as Notas", use_container_width=True, type="primary"):
-                st.session_state.menu_atual = "Gerenciar Notas"
+    st.divider()
+    notas = get_json("notas", str(st.session_state.usuario_id)) or []
+    if not notas:
+        st.info("Nenhuma nota encontrada.")
+        return
+
+    for nota in notas:
+        col_txt, col_del = st.columns([9, 1])
+        with col_txt:
+            if nota.get("tipo") == "Urgente":
+                st.error(f"🚨 {nota['conteudo']}")
+            else:
+                st.info(f"🔹 {nota['conteudo']}")
+        with col_del:
+            if st.button("🗑️", key=f"del_nota_{nota['id']}"):
+                res = delete_resource("notas", str(nota["id"]))
+                if res and res.ok:
+                    st.toast("Nota excluída.", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("Falha ao excluir nota.")
+
+
+def render_register_patient():
+    st.button(
+        "⬅️ Voltar",
+        key="btn_voltar_cad_paciente",
+        on_click=goto,
+        args=(MENU_LISTAR_PACIENTES,),
+    )
+
+    st.header("👶 Novo Prontuário")
+    with st.form("form_paciente"):
+        nome = st.text_input("Nome da Criança")
+        nasc = st.text_input("Data Nascimento (DD/MM/AAAA)")
+        resp = st.text_input("Responsável")
+        alerta = st.checkbox("Ponto de Alerta Ativo?")
+        
+        if st.form_submit_button("Salvar"):
+            payload = {
+                "nome": nome,
+                "data_nascimento": nasc,
+                "responsavel": resp,
+                "ponto_alerta": alerta,
+                "usuario_id": st.session_state.usuario_id,
+            }
+            res = post_json("pacientes", payload)
+            if res and res.ok:
+                st.success("👶 Prontuário cadastrado com sucesso!")
+                time.sleep(2)
                 st.rerun()
+            else:
+                st.error("Erro ao cadastrar paciente.")
 
-    elif menu == "Gerenciar Notas":
-        if st.button("⬅️ Voltar ao Dashboard"):
-            st.session_state.menu_atual = "Dashboard"
+
+def render_patient_list():
+    top_cols = st.columns([1, 2, 7])
+    with top_cols[0]:
+        st.button(
+            "⬅️ Voltar ao Dashboard",
+            key="btn_pacientes_voltar",
+            on_click=goto,
+            args=(MENU_DASHBOARD,),
+        )
+    with top_cols[1]:
+        st.button(
+            "➕ Novo Paciente",
+            type="primary",
+            use_container_width=True,
+            key="btn_novo_paciente",
+            on_click=goto,
+            args=(MENU_CADASTRAR_PACIENTE,),
+        )
+
+    if st.session_state.filtro_alerta:
+        st.warning("🚨 Exibindo apenas pacientes com Ponto de Alerta!")
+        if st.button("Mostrar Todos os Pacientes", key="btn_mostrar_todos"):
+            st.session_state.filtro_alerta = False
             st.rerun()
 
-        st.header("🗒️ Gerenciador de Notas")
+    st.header("📋 Prontuários dos Pacientes")
+    pacientes = get_json("pacientes", str(st.session_state.usuario_id)) or []
+    if not pacientes:
+        st.info("Você ainda não tem pacientes cadastrados.")
+        return
+
+    for paciente in pacientes:
+        if st.session_state.filtro_alerta and not paciente.get("ponto_alerta"):
+            continue
+        with st.expander(f"👤 {paciente['nome']}"):
+            st.write(f"**Responsável:** {paciente.get('responsavel', '—')}")
+            st.write(f"**Nascimento:** {paciente.get('data_nascimento', '—')}")
+            if paciente.get("ponto_alerta"):
+                st.warning("⚠️ Ponto de Alerta Ativo")
+
+
+def render_schedule_form():
+    st.button(
+        "⬅️ Voltar",
+        key="btn_voltar_agendamento",
+        on_click=goto,
+        args=(MENU_LISTA_ATENDIMENTOS,),
+    )
+
+    st.header("🗓️ Novo Agendamento")
+    pacientes = get_json("pacientes", str(st.session_state.usuario_id)) or []
+    if not pacientes:
+        st.info("Cadastre um paciente antes de agendar.")
+        return
+
+    with st.form("form_atend"):
+        paciente = st.selectbox("Selecione o Paciente", pacientes, format_func=lambda x: x["nome"])
+        data_sel = st.date_input("Data do Atendimento")
+        hora_sel = st.time_input("Horário")
         
-        with st.expander("➕ Nova Tarefa", expanded=True):
-            with st.form("form_nota"):
-                texto = st.text_input("Descrição da tarefa")
-                prioridade = st.selectbox("Prioridade", ["Normal", "Urgente"])
-                if st.form_submit_button("Adicionar"):
-                    payload = {"conteudo": texto, "tipo": prioridade, "usuario_id": st.session_state.usuario_id}
-                    requests.post(f"{BASE_URL}/notas/", json=payload)
+        if st.form_submit_button("Confirmar Agendamento"):
+            data_formatada = f"{data_sel.strftime('%d/%m/%Y')} {hora_sel.strftime('%H:%M')}"
+            payload = {
+                "usuario_id": st.session_state.usuario_id,
+                "paciente_id": paciente["id"],
+                "data": data_formatada,
+            }
+            res = post_json("atendimentos", payload)
+            if res and res.ok:
+                st.success(f"Agendado: {paciente['nome']} em {data_formatada}")
+                st.balloons()
+                time.sleep(2.5)
+                st.rerun()
+            else:
+                st.error("Erro ao salvar no banco de dados.")
+
+
+def render_appointments():
+    cols = st.columns([1, 2, 7])
+    with cols[0]:
+        st.button(
+            "⬅️ Voltar ao Dashboard",
+            key="btn_agenda_voltar",
+            on_click=goto,
+            args=(MENU_DASHBOARD,),
+        )
+    with cols[1]:
+        st.button(
+            "📅 Novo Agendamento",
+            type="primary",
+            use_container_width=True,
+            key="btn_novo_agendamento",
+            on_click=goto,
+            args=(MENU_AGENDAR_ATENDIMENTO,),
+        )
+
+    st.header("📅 Agenda de Atendimentos")
+    atendimentos = get_json("atendimentos", str(st.session_state.usuario_id)) or []
+    if not atendimentos:
+        st.info("Sua agenda está vazia para os próximos dias.")
+        return
+
+    for atendimento in atendimentos:
+        with st.container():
+            cols = st.columns([1, 2, 1])
+            cols[0].write(f"🗓️ **{atendimento['data']}**")
+            cols[1].write(f"👤 {atendimento['paciente_nome']}")
+            if cols[2].button("Cancelar", key=f"del_at_{atendimento['id']}"):
+                res = delete_resource("atendimentos", str(atendimento["id"]))
+                if res and res.ok:
+                    st.toast("Atendimento cancelado.", icon="✅")
                     st.rerun()
-
-        st.divider()
-
-        # Listagem simplificada apenas com texto e lixeira
-        try:
-            res = requests.get(f"{BASE_URL}/notas/{st.session_state.usuario_id}")
-            if res.status_code == 200:
-                for n in res.json():
-                    # Usamos apenas 2 colunas agora: Texto e Lixeira
-                    col_txt, col_del = st.columns([9, 1])
-                    
-                    with col_txt:
-                        if n['tipo'] == "Urgente":
-                            st.error(f"🚨 {n['conteudo']}")
-                        else:
-                            st.info(f"🔹 {n['conteudo']}")
-                            
-                    with col_del:
-                        # Botão de exclusão único por ID
-                        if st.button("🗑️", key=f"del_pag_{n['id']}"):
-                            requests.delete(f"{BASE_URL}/notas/{n['id']}")
-                            st.rerun()
-            else:
-                st.write("Nenhuma nota encontrada.")
-        except Exception as e:
-            st.error(f"Erro ao carregar notas: {e}")
-                    
-    # --- CADASTRAR PACIENTE ---
-    elif menu == "Cadastrar Paciente":
-
-        col_v_pac, _ = st.columns([1, 4])
-        with col_v_pac:
-            if st.button("⬅️ Voltar", key="v_cad_pac"):
-                st.session_state.menu_atual = "Listar Pacientes" # Volta para a lista
-                st.rerun()
-
-        st.header("👶 Novo Prontuário")
-        with st.form("form_paciente"):
-            nome = st.text_input("Nome da Criança")
-            nasc = st.text_input("Data Nascimento (DD/MM/AAAA)")
-            resp = st.text_input("Responsável")
-            alerta = st.checkbox("Ponto de Alerta Ativo?")
-            if st.form_submit_button("Salvar"):
-                dados = {
-                    "nome": nome, "data_nascimento": nasc, "responsavel": resp, 
-                    "ponto_alerta": alerta, "usuario_id": st.session_state.usuario_id
-                }
-                requests.post(API_PACIENTES, json=dados)
-                st.success("Cadastrado! Relogue para atualizar o Dashboard.")
-
-    # --- Listar Pacientes ---
-    elif menu == "Listar Pacientes":
-        # Navegação no topo
-        col_v1, col_v2, col_espaco = st.columns([1, 2, 7])
-        with col_v1:
-            if st.button("⬅️ Voltar ao Dashboard", key="v_dash_p"):
-                st.session_state.filtro_alerta = False
-                st.session_state.menu_atual = "Dashboard"
-                st.rerun()
-        with col_v2:
-            # Botão que leva ao formulário de cadastro
-            if st.button("➕ Novo Paciente", type="primary", use_container_width=True):
-                st.session_state.menu_atual = "Cadastrar Paciente"
-                st.rerun()
-
-        # Aviso visual se o filtro estiver ligado
-        if st.session_state.get('filtro_alerta'):
-            st.warning("🚨 Exibindo apenas pacientes com Ponto de Alerta!")
-            if st.button("Mostrar Todos os Pacientes"):
-                st.session_state.filtro_alerta = False
-                st.rerun()
-
-        st.header("📋 Prontuários dos Pacientes")
-            
-        url_completa = f"{API_PACIENTES}{st.session_state.usuario_id}"
-       
-        try:
-            res = requests.get(url_completa)
-            if res.status_code == 200:
-                pacientes = res.json()
-                if not pacientes:
-                    st.info("Você ainda não tem pacientes cadastrados.")
                 else:
-                    # O FOR COMEÇA AQUI: percorrendo a lista que veio do banco
-                    for p in pacientes:
-                        
-                        # LÓGICA DO FILTRO: 
-                        # Se o filtro está ativo e o paciente NÃO tem alerta, o código ignora ele
-                        if st.session_state.get('filtro_alerta') and not p.get('ponto_alerta'):
-                            continue
-                            
-                        # Só desenha o expander para quem passar pelo filtro acima
-                        with st.expander(f"👤 {p['nome']}"):
-                            st.write(f"**Responsável:** {p['responsavel']}")
-                            st.write(f"**Nascimento:** {p['data_nascimento']}")
-                            if p.get('ponto_alerta'):
-                                st.warning("⚠️ Ponto de Alerta Ativo")
-            else:
-                st.error(f"Erro ao buscar dados: {res.status_code}")
-        except Exception as e:
-            st.error(f"Falha na conexão: {e}")
+                    st.error("Falha ao cancelar atendimento.")
+            st.divider()
 
-    # --- AGENDAR ATENDIMENTO ---
-    elif menu == "Agendar Atendimento":
 
-        # Botão de Voltar
-        col_v_ag, _ = st.columns([1, 4])
-        with col_v_ag:
-            if st.button("⬅️ Voltar", key="v_cad_ag"):
-                st.session_state.menu_atual = "Lista de Atendimentos" # Volta para a lista
-                st.rerun()
+def render_logs():
+    st.button(
+        "⬅️ Voltar ao Dashboard",
+        key="btn_logs_voltar",
+        on_click=goto,
+        args=(MENU_DASHBOARD,),
+    )
 
-        st.header("🗓️ Novo Agendamento")
-        
-        # Busca lista de pacientes
-        res = requests.get(f"{API_PACIENTES}{st.session_state.usuario_id}")
-        
-        if res.status_code == 200:
-            lista_p = res.json()
-            
-            with st.form("form_atend"):
-                paciente = st.selectbox("Selecione o Paciente", lista_p, format_func=lambda x: x['nome'])
-                
-                # Campos separados e validados
-                data_col, hora_col = st.columns(2)
-                with data_col:
-                    data_sel = st.date_input("Data do Atendimento")
-                with hora_col:
-                    hora_sel = st.time_input("Horário")
-                
-                if st.form_submit_button("Confirmar Agendamento"):
-                    # Combinamos a data e hora no formato que o Backend espera
-                    data_formatada = f"{data_sel.strftime('%d/%m/%Y')} {hora_sel.strftime('%H:%M')}"
-                    
-                    dados = {
-                        "usuario_id": st.session_state.usuario_id,
-                        "paciente_id": paciente['id'],
-                        "data": data_formatada
-                    }
-                    
-                    res_post = requests.post(API_ATENDIMENTOS, json=dados)
-                    if res_post.status_code == 200:
-                        st.success(f"Agendado: {paciente['nome']} em {data_formatada}")
-                        st.balloons() # Um toque de comemoração pelo sucesso!
-                    else:
-                        st.error("Erro ao salvar no banco de dados.")
+    st.header("📝 Histórico de Registros")
+    st.write("Estas são as atividades recentes no seu sistema:")
 
-    # --- LISTA DE ATENDIMENTOS ---
-    elif menu == "Lista de Atendimentos":
+    pacientes = get_json("pacientes", str(st.session_state.usuario_id)) or []
+    atendimentos = get_json("atendimentos", str(st.session_state.usuario_id)) or []
+    logs = [f"🟢 **Paciente Cadastrado:** {p['nome']}" for p in pacientes]
+    logs += [f"🔵 **Atendimento Agendado:** {a['paciente_nome']} para {a['data']}" for a in atendimentos]
 
-        # Navegação no topo
-        col_a1, col_a2, col_espaco_at = st.columns([1, 2, 7])
-        with col_a1:
-            if st.button("⬅️ Voltar ao Dashboard", key="v_dash_a"):
-                st.session_state.menu_atual = "Dashboard"
-                st.rerun()
-        with col_a2:
-            # Botão que leva ao formulário de agendamento
-            if st.button("📅 Novo Agendamento", type="primary", use_container_width=True):
-                st.session_state.menu_atual = "Agendar Atendimento"
-                st.rerun()
+    st.session_state.total_registros = len(logs)
+    if not logs:
+        st.info("Nenhuma atividade registrada ainda.")
+        return
 
-        st.header("📅 Agenda de Atendimentos")
-        
-        url_atendimentos = f"{API_ATENDIMENTOS}{st.session_state.usuario_id}"
-        
-        try:
-            res = requests.get(url_atendimentos)
-            if res.status_code == 200:
-                atendimentos = res.json()
-                
-                if not atendimentos:
-                    st.info("Sua agenda está vazia para os próximos dias.")
-                else:
-                    # Ordenar por data (opcional, mas recomendado para engenharia)
-                    for a in atendimentos:
-                        with st.container():
-                            # Criamos um layout de linha para cada atendimento
-                            col_data, col_nome, col_status = st.columns([1, 2, 1])
-                            
-                            with col_data:
-                                st.write(f"🗓️ **{a['data']}**")
-                            
-                            with col_nome:
-                                st.write(f"👤 {a['paciente_nome']}")
-                            
-                            with col_status:
-                                # Um botão de excluir para cada atendimento
-                                if st.button("Cancelar", key=f"del_at_{a['id']}"):
-                                    requests.delete(f"{API_ATENDIMENTOS}{a['id']}")
-                                    st.toast(f"Atendimento de {a['paciente_nome']} cancelado.")
-                                    st.rerun()
-                            st.divider()
-            else:
-                st.error("Não foi possível carregar a agenda.")
-        except Exception as e:
-            st.error(f"Erro de conexão: {e}")
+    for log in reversed(logs):
+        st.info(log)
 
-    elif menu == "Logs do Sistema":
-            if st.button("⬅️ Voltar ao Dashboard"):
-                st.session_state.menu_atual = "Dashboard"
-                st.rerun()
 
-            st.header("📝 Histórico de Registros")
-            st.write("Estas são as atividades recentes no seu sistema:")
+init_state()
 
-            try:
-                # Pegamos os pacientes e atendimentos para montar um log simples
-                res_p = requests.get(f"{API_PACIENTES}{st.session_state.usuario_id}")
-                res_a = requests.get(f"{API_ATENDIMENTOS}{st.session_state.usuario_id}")
-                
-                if res_p.status_code == 200 and res_a.status_code == 200:
-                    pacientes = res_p.json()
-                    atendimentos = res_a.json()
-                    
-                    # Criamos uma lista de mensagens de log
-                    logs = []
-                    for p in pacientes:
-                        logs.append(f"🟢 **Paciente Cadastrado:** {p['nome']}")
-                    for a in atendimentos:
-                        logs.append(f"🔵 **Atendimento Agendado:** {a['paciente_nome']} para {a['data']}")
-                    
-                    # Atualizamos o contador do Dashboard
-                    st.session_state.total_registros = len(logs)
-                    
-                    if not logs:
-                        st.info("Nenhuma atividade registrada ainda.")
-                    else:
-                        # Mostra os logs do mais novo para o mais antigo
-                        for log in reversed(logs):
-                            st.info(log)
-                else:
-                    st.error("Erro ao carregar registros.")
-            except Exception as e:
-                st.error(f"Falha na conexão: {e}")
+if not st.session_state.logado:
+    render_login_screen()
+else:
+    render_top_sidebar()
+    page = st.session_state.menu_atual
+    if page == MENU_DASHBOARD:
+        render_dashboard()
+    elif page == MENU_NOTAS:
+        render_notes()
+    elif page == MENU_CADASTRAR_PACIENTE:
+        render_register_patient()
+    elif page == MENU_LISTAR_PACIENTES:
+        render_patient_list()
+    elif page == MENU_AGENDAR_ATENDIMENTO:
+        render_schedule_form()
+    elif page == MENU_LISTA_ATENDIMENTOS:
+        render_appointments()
+    elif page == MENU_LOGS:
+        render_logs()
+    else:
+        st.error("Menu desconhecido. Por favor, reinicie a página.")
